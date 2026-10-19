@@ -1,0 +1,16 @@
+{
+  "name": "Our Trip: Munich to Athens",
+  "short_name": "Our Trip",
+  "description": "Our 74-day bike trip from Munich to Athens.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2E8D2",
+  "theme_color": "#F2E8D2",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
