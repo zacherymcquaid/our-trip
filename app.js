@@ -23,7 +23,7 @@
   // ---------------------------------------------------------------- state
   const KEY = 'ourtrip.v1';
   const DEF = { names: ['', ''], ridden: [], journal: {}, packed: {}, extra: [], quizBest: 0, theme: 'auto', mapStyle: 'terrain',
-    expenses: [], rates: { EUR: 1, CAD: 1.55, ALL: 98, MKD: 61.5, BAM: 1.956 }, sosNotes: '' };
+    komoot: {}, expenses: [], rates: { EUR: 1, CAD: 1.55, ALL: 98, MKD: 61.5, BAM: 1.956 }, sosNotes: '' };
   let S = { ...DEF };
   try { S = { ...DEF, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch (e) { /* fresh */ }
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage full or blocked */ } };
@@ -60,14 +60,15 @@
   });
 
   // ---------------------------------------------------------------- trip helpers
-  const START = new Date(2027, 5, 1), END = new Date(2027, 7, 13);
+  const ARRIVE = new Date(2027, 5, 2), START = new Date(2027, 5, 4), END = new Date(2027, 7, 16);
   const TOTAL_KM = DAYS.reduce((a, d) => a + d.km, 0), TOTAL_UP = DAYS.reduce((a, d) => a + d.up, 0);
   const day = (n) => DAYS.find((d) => d.day === n);
   const isoOf = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const addDays = (iso, n) => { const [y, m, d] = iso.split('-').map(Number); return isoOf(new Date(y, m - 1, d + n)); };
   function status() {
     const now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    if (today < START) return { phase: 'before', toGo: Math.round((START - today) / 864e5) };
+    if (today < ARRIVE) return { phase: 'before', toGo: Math.round((ARRIVE - today) / 864e5) };
+    if (today < START) return { phase: 'arrival' };
     if (today > END) return { phase: 'after' };
     const iso = isoOf(today);
     return { phase: 'during', tripDay: Math.round((today - START) / 864e5) + 1, ride: DAYS.find((d) => d.iso === iso), rest: RESTS.find((r) => r.iso === iso) };
@@ -203,9 +204,11 @@
     const standalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
     let heroHtml;
     if (st.phase === 'before') {
-      heroHtml = `<div class="hero"><div class="eyebrow">Wheels roll in Munich</div>
-        <div class="big num">${fmt(st.toGo)}</div><div>days to go · Tuesday, June 1, 2027</div>
+      heroHtml = `<div class="hero"><div class="eyebrow">We land in Munich</div>
+        <div class="big num">${fmt(st.toGo)}</div><div>days to go · Wednesday, June 2, 2027 · first ride June 4</div>
         <div class="route-art" style="opacity:.35">${routeArt(170)}</div></div>`;
+    } else if (st.phase === 'arrival') {
+      heroHtml = `<div class="hero tap" data-go-day="1" style="cursor:pointer"><div class="eyebrow">Munich days · June 2 and 3</div><h2 style="color:inherit">Willkommen in München!</h2><div>Sleep off the jet lag, build the bikes, grab a SIM and cash, wander the Altstadt and the English Garden, and end at a beer garden. Day 1 to Diessen am Ammersee rolls out Friday, June 4.</div><div class="small" style="opacity:.8">Tap for the first ride</div></div>`;
     } else if (st.phase === 'during') {
       heroHtml = st.ride
         ? `<div class="hero tap" data-go-day="${st.ride.day}" style="cursor:pointer"><div class="eyebrow">Trip day ${st.tripDay} of 74 · today</div>
@@ -214,7 +217,7 @@
             <div class="small" style="opacity:.8">${esc(st.ride.note)} · tap for the day</div></div>`
         : `<div class="hero"><div class="eyebrow">Trip day ${st.tripDay} of 74</div><h2 style="color:inherit">Rest day in ${esc(short(st.rest ? st.rest.place : ''))}</h2><div>Swim, eat, nap, repeat.</div></div>`;
     } else {
-      heroHtml = `<div class="hero"><div class="eyebrow">August 13, 2027</div><h2 style="color:inherit">We made it to Athens.</h2><div class="num">${fmt(TOTAL_KM)} km · ${fmt(TOTAL_UP)} m up · together</div></div>`;
+      heroHtml = `<div class="hero"><div class="eyebrow">August 16, 2027</div><h2 style="color:inherit">We made it to Athens.</h2><div class="num">${fmt(TOTAL_KM)} km · ${fmt(TOTAL_UP)} m up · together</div></div>`;
     }
     return `
       <div class="row between"><div class="eyebrow">${esc(couple())}</div><button class="chip" data-push="settings" aria-label="Settings">Settings</button></div>
@@ -275,7 +278,7 @@
         <h3>${esc(short(d.start))} → ${esc(short(d.end))}</h3>
         <div class="num small">${d.km} km · ${fmt(d.up)} m up · ${d.gravel}% gravel · <span class="pill" style="background:${EFFORT[d.effort]}">${d.effort}</span></div>
         <div class="small muted">${esc(d.note)}</div>
-        <div class="row" style="margin-top:6px"><button class="btn small" data-go-day="${d.day}">Open day</button><button class="btn small ghost" data-act="close-sheet">Close</button></div></div>`;
+        <div class="row" style="margin-top:6px"><button class="btn small" data-go-day="${d.day}">Open day</button>${S.komoot[d.day] ? `<a class="btn small" style="background:#4F8A10" href="${esc(S.komoot[d.day])}" target="_blank" rel="noopener">Komoot</a>` : ''}<button class="btn small ghost" data-act="close-sheet">Close</button></div></div>`;
     }
     if (mapState.place) {
       const p = HL.find((h) => h.name === mapState.place);
@@ -406,6 +409,7 @@
       ${(places.length || endStory) ? `<div class="card"><h3>Stories along the way</h3>
         ${places.map((p) => `<div class="story" data-place="${esc(p.name)}" role="button" tabindex="0"><b>${(CAT[p.cat] || ['📍'])[0]} ${esc(short(p.name))}</b><span class="small">${esc(story(p.name) || p.note)}</span></div>`).join('')}
         ${endStory && !places.some((p) => short(p.name) === short(d.end)) ? `<div class="story"><b>🏕️ Tonight: ${esc(short(d.end))}</b><span class="small">${esc(endStory)}</span></div>` : ''}</div>` : ''}
+      ${komootCard(d)}
       <div class="card"><h3>Sleep in ${esc(searchPlace(d.end))}</h3><p class="small muted">Dates and 2 adults are filled in. ${rest ? 'Two nights because of the rest day.' : ''}</p>
         <div class="links">${stays.map(([a, b, u]) => `<a href="${u}" target="_blank" rel="noopener"><b>${a}</b><span>${esc(b)}</span></a>`).join('')}</div></div>
       <div class="card"><h3>Ride tools</h3><div class="links">${rides.map(([a, b, u]) => `<a href="${u}" target="_blank" rel="noopener"><b>${a}</b><span>${esc(b)}</span></a>`).join('')}</div>
@@ -420,6 +424,17 @@
         <button class="btn ${done ? 'ok' : ''}" data-act="toggle-done">${done ? '✓ We rode it!' : 'Mark as ridden'}</button>
       </div>
       <div class="row between">${prev ? `<button class="chip" data-go-day="${prev.day}">‹ Day ${prev.day}</button>` : '<span></span>'}${next ? `<button class="chip" data-go-day="${next.day}">Day ${next.day} ›</button>` : '<span></span>'}</div>`;
+  }
+  const KOMOOT_RE = /https?:\/\/(?:www\.)?komoot\.(?:com|de)\/[^\s"'<>]+/gi;
+  function komootCard(d) {
+    const u = S.komoot[d.day];
+    if (u) return `<div class="card" style="border-color:#6AA127;border-width:2px"><h3>Navigate in Komoot</h3>
+        <a class="btn" style="background:#4F8A10" href="${esc(u)}" target="_blank" rel="noopener">Open Day ${d.day} in Komoot</a>
+        <p class="small muted">Opens your planned tour in the Komoot app. <button class="chip" data-act="komoot-clear" style="margin-left:4px">Change link</button></p></div>`;
+    return `<form class="card" id="komootForm"><h3>Link this day's Komoot tour</h3>
+        <p class="small muted">In Komoot open the Day ${d.day} tour, tap Share, copy the link and paste it here.</p>
+        <input type="text" id="komootIn" inputmode="url" placeholder="https://www.komoot.com/tour/...">
+        <button class="btn small" type="submit">Save link</button></form>`;
   }
   async function hydrateDay(n) {
     const box = $('#photos'); if (!box) return;
@@ -547,6 +562,11 @@
         <label class="field" for="incPhotos"><span><input type="checkbox" id="incPhotos"> Include photos (bigger file)</span></label>
         <button class="btn" data-act="export">Export our trip</button>
         <label class="btn ghost" for="importFile" style="cursor:pointer">Import from the other phone</label><input type="file" id="importFile" accept="application/json,.json" hidden></div>
+      <form class="card" id="komootBulk"><h3>Komoot tours</h3>
+        <p class="small">${Object.keys(S.komoot).length} of ${DAYS.length} riding days linked. Paste all your tour links at once, in day order (Day 1 first). Each link goes to the next riding day.</p>
+        <textarea id="komootList" placeholder="https://www.komoot.com/tour/111...&#10;https://www.komoot.com/tour/222..."></textarea>
+        <label class="field" for="komootStart">Start at riding day<input type="number" id="komootStart" min="1" max="74" value="1"></label>
+        <button class="btn" type="submit">Link these tours</button></form>
       <div class="card"><h3>Offline maps</h3><p class="small">Map tiles you've looked at are saved for offline use. Before you leave, open the map on Wi-Fi and zoom through each week once. The route, stops and all the stories always work offline.</p></div>`;
   }
   function settingsPage() {
@@ -593,6 +613,7 @@
       Object.entries(o.packed || {}).forEach(([k, v]) => { const m = S.packed[k] || [false, false]; S.packed[k] = [m[0] || v[0], m[1] || v[1]]; });
       S.extra = [...new Set([...(S.extra || []), ...(o.extra || [])])];
       const ids = new Set(S.expenses.map((e) => e.id)); (o.expenses || []).forEach((e) => { if (!ids.has(e.id)) S.expenses.push(e); });
+      S.komoot = { ...(o.komoot || {}), ...S.komoot };
       S.quizBest = Math.max(S.quizBest, o.quizBest || 0);
       if (!S.sosNotes && o.sosNotes) S.sosNotes = o.sosNotes;
       for (const p of data.photos || []) { const b = await (await fetch(p.data)).blob(); await addPhotoBlob(p.day, b); }
@@ -637,6 +658,7 @@
         navigator.geolocation.getCurrentPosition((p) => { mapState.me = { lat: p.coords.latitude, lon: p.coords.longitude }; if (mapInst) mapInst.centerOn(mapState.me.lat, mapState.me.lon, Math.max(mapInst.z, 10)); },
           () => toast('Allow location to see where you are'), { enableHighAccuracy: true, timeout: 10000 });
         return;
+      case 'komoot-clear': delete S.komoot[stack[stack.length - 1].day]; save(); return render();
       case 'export': return exportTrip();
       case 'reset-ask': $('#resetConfirm').innerHTML = '<div class="row"><button class="btn small" data-act="reset-yes">Yes, reset</button><button class="btn small ghost" data-act="reset-no">Keep it</button></div>'; return;
       case 'reset-yes': S.ridden = []; S.packed = {}; save(); toast('Progress reset'); return back();
@@ -660,6 +682,19 @@
       if (f.id === 'setForm') { S.theme = $('#sTheme').value; applyTheme(); }
       save();
       if (f.id === 'setForm') { toast('Saved'); back(); } else render();
+    }
+    if (f.id === 'komootForm') {
+      const m = ($('#komootIn').value.match(KOMOOT_RE) || [])[0];
+      if (!m) { toast('Paste a komoot.com link'); return; }
+      S.komoot[stack[stack.length - 1].day] = m; save(); render(); toast('Komoot tour linked');
+    }
+    if (f.id === 'komootBulk') {
+      const urls = $('#komootList').value.match(KOMOOT_RE) || [];
+      if (!urls.length) { toast('No Komoot links found'); return; }
+      const startDay = parseInt($('#komootStart').value, 10) || 1;
+      const ride = DAYS.filter((d) => d.day >= startDay);
+      urls.forEach((u, i) => { if (ride[i]) S.komoot[ride[i].day] = u; });
+      save(); render(); toast(`Linked ${Math.min(urls.length, ride.length)} days`);
     }
     if (f.id === 'extraForm') { const v = $('#extraIn').value.trim(); if (v && !S.extra.includes(v)) { S.extra.push(v); save(); } render(); }
     if (f.id === 'expForm') {

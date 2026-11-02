@@ -1,5 +1,5 @@
 /* Offline support: app files are cached on install; fonts and viewed map tiles are cached as you use them. */
-const VERSION = 'ourtrip-v1';
+const VERSION = 'ourtrip-v4';
 const SHELL = ['./', 'index.html', 'style.css', 'data.js', 'map.js', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png'];
 const TILE_CACHE = 'ourtrip-tiles', FONT_CACHE = 'ourtrip-fonts', MAX_TILES = 6000;
