@@ -23,10 +23,17 @@
   // ---------------------------------------------------------------- state
   const KEY = 'ourtrip.v1';
   const DEF = { names: ['', ''], ridden: [], journal: {}, packed: {}, extra: [], quizBest: 0, theme: 'auto', mapStyle: 'terrain',
-    komoot: {}, expenses: [], rates: { EUR: 1, CAD: 1.55, ALL: 98, MKD: 61.5, BAM: 1.956 }, sosNotes: '' };
+    komoot: {}, expenses: [], rates: { EUR: 1, CAD: 1.55, ALL: 98, MKD: 61.5, BAM: 1.956 }, sosNotes: '',
+    ts: {}, gone: [], prep: {}, sync: null, offline: {}, wx: {}, checkins: [] };
   let S = { ...DEF };
   try { S = { ...DEF, ...JSON.parse(localStorage.getItem(KEY) || '{}') }; } catch (e) { /* fresh */ }
-  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage full or blocked */ } };
+  let syncTimer = null;
+  const save = () => {
+    try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* storage full or blocked */ }
+    if (S.sync) { clearTimeout(syncTimer); syncTimer = setTimeout(() => syncNow(false), 5000); }
+  };
+  // every shared change gets a time stamp so the two phones can merge: newest change wins
+  const touch = (k) => { S.ts[k] = Date.now(); };
   const applyTheme = () => { if (S.theme === 'auto') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', S.theme); };
   applyTheme();
 
@@ -45,7 +52,7 @@
       return await new Promise((res) => { const q = d.transaction('photos').objectStore('photos').index('day').getAll(day); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); });
     } catch (e) { return []; }
   };
-  const addPhotoBlob = async (day, blob) => { const d = await db(); return new Promise((res) => { const tx = d.transaction('photos', 'readwrite'); tx.objectStore('photos').add({ day, blob, at: Date.now() }); tx.oncomplete = res; tx.onerror = res; }); };
+  const addPhotoBlob = async (day, blob, at) => { const d = await db(); return new Promise((res) => { const tx = d.transaction('photos', 'readwrite'); tx.objectStore('photos').add({ day, blob, at: at || Date.now() }); tx.oncomplete = res; tx.onerror = res; }); };
   const delPhoto = async (id) => { const d = await db(); return new Promise((res) => { const tx = d.transaction('photos', 'readwrite'); tx.objectStore('photos').delete(id); tx.oncomplete = res; tx.onerror = res; }); };
   const shrink = (file) => new Promise((res) => {
     const img = new Image(), url = URL.createObjectURL(file);
@@ -150,9 +157,10 @@
     renderTabs();
     const top = stack[stack.length - 1];
     if (top) {
-      const html = { day: dayPage, country: countryPage, place: placePage, quiz: quizPage, settings: settingsPage, week: weekRedirect }[top.name](top);
+      const html = { day: dayPage, country: countryPage, place: placePage, quiz: quizPage, settings: settingsPage, week: weekRedirect, climbs: climbsPage, recap: recapPage }[top.name](top);
       view.innerHTML = `<div class="scroll" id="sc"><div class="wrap">${html}</div></div>`;
-      if (top.name === 'day') hydrateDay(top.day);
+      if (top.name === 'day') { hydrateDay(top.day); hydrateWeather(top.day); }
+      if (top.name === 'recap') hydrateRecap();
       $('#sc').scrollTop = 0;
       return;
     }
@@ -216,7 +224,7 @@
             <h2 style="color:inherit">${esc(short(st.ride.start))} → ${esc(short(st.ride.end))}</h2>
             <div class="num">${st.ride.km} km · ${fmt(st.ride.up)} m up · ${st.ride.effort}</div>
             <div class="small" style="opacity:.8">${esc(st.ride.note)} · tap for the day</div></div>`
-        : `<div class="hero"><div class="eyebrow">Trip day ${st.tripDay} of 74</div><h2 style="color:inherit">Rest day in ${esc(short(st.rest ? st.rest.place : ''))}</h2><div>Swim, eat, nap, repeat.</div></div>`;
+        : `<div class="hero"><div class="eyebrow">Trip day ${st.tripDay} of 74</div><h2 style="color:inherit">Rest day in ${esc(short(st.rest ? st.rest.place : ''))}</h2><div>${esc((st.rest && st.rest.note) || 'Swim, eat, nap, repeat.')}</div></div>`;
     } else {
       heroHtml = `<div class="hero"><div class="eyebrow">August 16, 2027</div><h2 style="color:inherit">We made it to Athens.</h2><div class="num">${fmt(TOTAL_KM)} km · ${fmt(TOTAL_UP)} m up · together</div></div>`;
     }
@@ -232,6 +240,8 @@
           <div class="stat"><b>${fmt(kmDone)}</b><span>of ${fmt(TOTAL_KM)} km</span></div><div class="stat"><b>${fmt(upDone)}</b><span>m climbed</span></div></div>
         ${next ? `<button class="btn" data-go-day="${next.day}" style="background:${WEEK_COLORS[next.week]}">Next: Day ${next.day} · ${esc(short(next.start))} → ${esc(short(next.end))}</button>` : ''}
       </div>
+      ${checkinCard()}
+      <div class="card tap" data-push="recap"><h2>Our story</h2><p class="small">Every ridden day with your moods, journal and photos, ready to print or save as a PDF.</p></div>
       <div class="card"><h2>Passport stamps</h2><p class="small muted">A stamp lands the first time you ride a day in each country.</p>
         <div class="stamps">${K.COUNTRIES.map((c) => `<button class="stamp ${stamped.has(c.name) ? 'got' : ''}" data-country="${esc(c.name)}"><span class="seal">${c.flag}</span><small>${esc(c.name === 'North Macedonia' ? 'N. Macedonia' : c.name)}</small></button>`).join('')}</div>
       </div>
@@ -319,6 +329,8 @@
           showSights: mapState.sights,
           weekBadges: mapState.week ? [] : WEEKS.map((w) => { const d = DAYS.find((x) => x.week === w.week); const p = d.line[0][0]; return { week: w.week, color: WEEK_COLORS[w.week], x: TripMap.lonX(p[1]), y: TripMap.latY(p[0]) }; }),
           me: mapState.me,
+          pois: mapState.sel ? [...day(mapState.sel).water.map((w) => ({ x: TripMap.lonX(w[5]), y: TripMap.latY(w[4]), emoji: w[1] === 'Spring' ? '🌿' : '💧' })),
+            ...day(mapState.sel).shops.map((f) => ({ x: TripMap.lonX(f[5]), y: TripMap.latY(f[4]), emoji: '🛒' }))] : [],
         };
       },
       onTap: (hit) => {
@@ -330,6 +342,7 @@
       },
     });
     void css;
+    if (!navigator.onLine && S.mapStyle === 'terrain' && Object.keys(S.offline).length) setTimeout(() => toast('Offline: tap 🗺️ for your downloaded maps'), 400);
     if (mapState.view) { Object.assign(mapInst, mapState.view); mapInst.draw(); }
     else mapInst.fitBounds(boundsOf(mapState.week ? DAYS.filter((d) => d.week === mapState.week) : DAYS), false, 24);
   }
@@ -345,7 +358,8 @@
 
   // ---------------------------------------------------------------- days list
   function daysPage() {
-    return `<h1>The days</h1><p class="lede">64 riding days and 10 rest days. Tap a day for its route, profile, stories and places to sleep.</p>
+    return `<h1>The days</h1><p class="lede">64 riding days and 10 rest days. Tap a day for its route, profile, climbs, water, weather and places to sleep.</p>
+      <div class="card tap" data-push="climbs"><h2>⛰️ Climb guide</h2><p class="small">Every climb over 150 m on the route, biggest first, with length, gradient and where it tops out.</p></div>
       ${WEEKS.map((w) => {
         const ds = DAYS.filter((d) => d.week === w.week);
         return `<section class="card">
@@ -359,7 +373,7 @@
                 <div class="t"><div>${esc(short(d.start))} → ${esc(short(d.end))}${d.ferry ? ' ⛴️' : ''}</div>
                 <div class="small muted num">${esc(d.date)} · ${d.km} km · ${fmt(d.up)} m</div></div>
                 <span class="pill" style="background:${EFFORT[d.effort]}">${d.effort}</span></div>
-              ${rest ? `<div class="day-row" style="cursor:default"><span class="dot" style="background:var(--gold)">☾</span><div class="t"><div style="font-weight:400;font-style:italic">Day ${rest.day}: rest day in ${esc(short(rest.place))}</div></div></div>` : ''}`;
+              ${rest ? `<div class="day-row" style="cursor:default"><span class="dot" style="background:var(--gold)">☾</span><div class="t"><div style="font-weight:400;font-style:italic">Day ${rest.day}: rest day in ${esc(short(rest.place))}</div>${rest.note ? `<div class="small muted" style="white-space:normal">${esc(rest.note)}</div>` : ''}</div></div>` : ''}`;
           }).join('')}</div></section>`;
       }).join('')}`;
   }
@@ -406,7 +420,11 @@
         <button class="btn ghost small" data-map-day="${d.day}">Show on the map</button></div>
       <div class="card"><h3>Today's highlights</h3><p style="font-family:var(--f-display);font-style:italic">${esc(d.note || 'Quiet roads and small villages.')}</p>
         ${d.ferry ? `<p class="small">⛴️ <b>Ferry:</b> ${esc(d.ferry)} · <a href="${ferryLink(d.ferry.split(';')[0].trim())}" target="_blank" rel="noopener">timetable & tickets</a></p>` : ''}
-        ${rest ? `<p class="small" style="color:var(--ok)"><b>Tomorrow is a rest day in ${esc(short(rest.place))}.</b> Book two nights.</p>` : ''}</div>
+        ${rest ? `<p class="small" style="color:var(--ok)"><b>Tomorrow is a rest day in ${esc(short(rest.place))}.</b> Book two nights.</p>${rest.note ? `<p class="small"><b>Rest day idea:</b> ${esc(rest.note)}</p>` : ''}` : ''}
+        ${HEADS_UP[d.day] ? `<p class="small" style="border-left:3px solid var(--gold);padding-left:8px"><b>Heads-up:</b> ${HEADS_UP[d.day]}</p>` : ''}</div>
+      <div class="card" id="wx"><h3>Weather</h3><p class="small muted">Checking…</p></div>
+      ${climbCard(d, color)}
+      ${supplyCard(d)}
       ${(places.length || endStory) ? `<div class="card"><h3>Stories along the way</h3>
         ${places.map((p) => `<div class="story" data-place="${esc(p.name)}" role="button" tabindex="0"><b>${(CAT[p.cat] || ['📍'])[0]} ${esc(short(p.name))}</b><span class="small">${esc(story(p.name) || p.note)}</span></div>`).join('')}
         ${endStory && !places.some((p) => short(p.name) === short(d.end)) ? `<div class="story"><b>🏕️ Tonight: ${esc(short(d.end))}</b><span class="small">${esc(endStory)}</span></div>` : ''}</div>` : ''}
@@ -452,6 +470,413 @@
     const box = $('#photos'); if (!box) return;
     const ps = await photosFor(n);
     box.innerHTML = ps.map((p) => `<img src="${URL.createObjectURL(p.blob)}" alt="Trip photo" data-photo="${p.id}" title="Long-press or double-click to remove">`).join('');
+  }
+
+  // ---------------------------------------------------------------- heads-ups for tricky days
+  const HEADS_UP = {
+    20: 'Now a short, easy valley day. The climb to Sauris moved to yesterday\'s rest day, so you are not riding it twice.',
+    38: 'The Kotor serpentine: 25 numbered hairpins up from the bay toward Njeguši, about 900 m of climbing in one go. Leave Kotor early, before the tour buses and the heat.',
+    45: 'Lake Komani ferry day. Book seats ahead with one of the operators, tell them you have two bikes, and be at Koman early; boats leave in the morning.',
+    60: 'Ride the old SH8 road over the Llogara Pass (1,027 m). The new Llogara tunnel is built for motor traffic, so plan on the pass. The descent to Dhërmi is steep with hairpins: check your brakes at the top.',
+    66: 'Bikes are not allowed in the Aktio–Preveza undersea tunnel. Cyclists report rides in a road-authority van (2024), a paid bus option or a taxi; ask at the tunnel entrance, and if nothing works the fallback is a long detour via Arta.',
+    74: 'Two ferries today (Methana–Aegina, then Aegina–Piraeus). Check the summer timetables the night before so you make the last boat.',
+  };
+
+  // ---------------------------------------------------------------- climbs
+  const climbClass = (g) => (g >= 600 ? ['Big climb', '#A82A20'] : g >= 300 ? ['Solid climb', '#C8641E'] : ['Short climb', '#B7841C']);
+  function climbRows(d) {
+    return d.climbs.map((c, i) => {
+      const [lab, col] = climbClass(c.gain);
+      return `<div class="climb"><div class="row between"><b>Climb ${i + 1}${c.near && /pass|Njegusi|Sauris/i.test(c.near) ? ` · to ${esc(short(c.near))}` : ''}</b><span class="pill" style="background:${col}">${lab}</span></div>
+        <div class="num small">km ${c.start}–${Math.round((c.start + c.len) * 10) / 10} · ${c.len} km · +${fmt(c.gain)} m · ${c.avg}% average</div>
+        <div class="small muted">Steepest km about ${Math.round(c.max)}% · tops out near ${fmt(c.top)} m</div></div>`;
+    }).join('');
+  }
+  function climbCard(d) {
+    const body = d.climbs.length ? climbRows(d)
+      : `<p class="small">${d.up >= 500 ? `No single climb over 150 m today. The ${fmt(d.up)} m of climbing comes in short, rolling hills.` : 'No real climbs today.'}</p>`;
+    return `<div class="card"><h3>Climbs</h3>${body}<p class="small muted">From a terrain model: short ramps can be steeper than the averages, and the steepest-km figure can be off by a few percent.</p></div>`;
+  }
+  function climbsPage() {
+    const all = DAYS.flatMap((d) => d.climbs.map((c, i) => ({ ...c, d, i }))).sort((a, b) => b.gain - a.gain);
+    return `<div class="detail-head"><button class="back" data-act="back">‹ Back</button></div><h1>Climb guide</h1>
+      <p class="lede">${all.length} climbs of 150 m or more. The biggest are in the Alps (weeks 1–3), Montenegro and southern Albania.</p>
+      ${all.map((c) => { const [lab, col] = climbClass(c.gain); return `<div class="card tap" data-go-day="${c.d.day}"><div class="row between"><b>Day ${c.d.day} · ${esc(short(c.d.start))} → ${esc(short(c.d.end))}</b><span class="pill" style="background:${col}">${lab}</span></div>
+        <div class="num small">+${fmt(c.gain)} m over ${c.len} km · ${c.avg}% avg · steepest km ~${Math.round(c.max)}%</div>
+        <div class="small muted">Starts at km ${c.start} of the day, tops out near ${fmt(c.top)} m${c.near && /pass|Njegusi|Sauris/i.test(c.near) ? ` (${esc(short(c.near))})` : ''} · ${esc(c.d.date)}</div></div>`; }).join('')}`;
+  }
+
+  // ---------------------------------------------------------------- food and water
+  const BALKANS = ['Bosnia', 'Montenegro', 'Albania', 'North Macedonia'];
+  const SIGNS = {
+    Germany: ['Trinkwasser', 'Kein Trinkwasser'], Austria: ['Trinkwasser', 'Kein Trinkwasser'], Italy: ['Acqua potabile', 'Acqua non potabile'],
+    Slovenia: ['Pitna voda', 'Ni pitna voda'], Croatia: ['Pitka voda', 'Voda nije pitka'], Bosnia: ['Pitka voda', 'Nije za piće'],
+    Montenegro: ['Pijaća voda', 'Nije za piće'], Albania: ['Ujë i pijshëm', 'Ujë i papijshëm'], 'North Macedonia': ['Вода за пиење (voda za pienje)', 'Не е за пиење (ne e za pienje)'],
+    Greece: ['Πόσιμο νερό (pósimo neró)', 'Μη πόσιμο νερό (mi pósimo neró)'],
+  };
+  const WLAB = { 'Drinking fountain': ['💧', 'Drinking water', 'Mapped as drinking water'], 'Water tap': ['🚰', 'Water tap', 'Check for a sign'], Spring: ['🌿', 'Spring', 'Untreated: filter it'] };
+  function gaps(points, total) {
+    const ks = [0, ...points.map((p) => p[0]).sort((a, b) => a - b), total];
+    let best = [0, 0];
+    for (let i = 1; i < ks.length; i++) if (ks[i] - ks[i - 1] > best[1] - best[0]) best = [ks[i - 1], ks[i]];
+    return best;
+  }
+  function waterSafety(countries) {
+    return `<details class="small"><summary><b>Is the water safe?</b></summary><div style="display:flex;flex-direction:column;gap:6px;margin-top:6px">
+      <p><b>💧 Drinking water</b> points are mapped by locals in OpenStreetMap as drinkable. In Germany, Austria, Italy and Slovenia village fountains and cemetery taps are normally treated mains water and fine to drink, unless a sign says otherwise.</p>
+      <p><b>🌿 Springs</b> are never treated. Always filter, even when it looks crystal clear.</p>
+      <p><b>In the Balkans</b> (Bosnia, Montenegro, Albania, North Macedonia) roadside fountains are often spring-fed and untreated. Locals drink them, but your stomach isn't used to them: filter, or buy bottled water in towns.</p>
+      <p><b>Your squeeze filter</b> removes bacteria and parasites. Add a purification tablet for water from troughs, near farms or villages, or anything murky.</p>
+      <p><b>Read the sign:</b> ${countries.map((c) => SIGNS[c] ? `${FLAG[c] || ''} drink “${esc(SIGNS[c][0])}”, don't drink “${esc(SIGNS[c][1])}”` : '').filter(Boolean).join('<br>')}</p>
+      <p class="muted">Points come from OpenStreetMap: a few may be broken, dry in late summer, or shut for the season.</p></div></details>`;
+  }
+  function supplyCard(d) {
+    const W = d.water, F = d.shops, gw = gaps(W, d.km), gf = gaps(F, d.km);
+    const balkan = d.countries.some((c) => BALKANS.includes(c));
+    const maps = (la, lo) => `https://www.google.com/maps/search/?api=1&query=${la},${lo}`;
+    const row = (p, kind) => {
+      const [km, sub, name, hrs, la, lo, off] = p;
+      const w = kind === 'w' ? WLAB[sub] || ['💧', sub, ''] : ['🛒', sub, ''];
+      return `<a class="poi" href="${maps(la, lo)}" target="_blank" rel="noopener"><span class="num">km ${km}</span><span>${w[0]} <b>${esc(name || w[1])}</b>${name ? ` <span class="muted">${esc(w[1])}</span>` : ''}${w[2] ? `<br><span class="muted">${esc(w[2])}</span>` : ''}${hrs ? `<br><span class="muted">${esc(hrs)}</span>` : ''}</span><span class="muted">${off > 150 ? `${off} m off` : ''}</span></a>`;
+    };
+    const warnW = gw[1] - gw[0] >= 25, warnF = gf[1] - gf[0] >= 35;
+    return `<div class="card"><h3>Food and water</h3>
+      <div class="grid2"><div class="stat"><b>${F.length}</b><span>shops and bakeries</span></div><div class="stat"><b>${W.length}</b><span>water points</span></div></div>
+      <p class="small ${warnW ? '' : 'muted'}">${warnW ? '⚠️ ' : ''}Longest stretch with no mapped water: <b>${Math.round(gw[1] - gw[0])} km</b> (km ${Math.round(gw[0])}–${Math.round(gw[1])}).${warnW ? ' Fill everything before it.' : ''}</p>
+      <p class="small ${warnF ? '' : 'muted'}">${warnF ? '⚠️ ' : ''}Longest stretch with no shop: <b>${Math.round(gf[1] - gf[0])} km</b> (km ${Math.round(gf[0])}–${Math.round(gf[1])}).${warnF ? ' Carry lunch and snacks.' : ''}</p>
+      ${balkan ? '<p class="small" style="border-left:3px solid var(--sea);padding-left:8px">Balkan fountains are often untreated spring water. Filter before you drink.</p>' : ''}
+      ${W.length ? `<details><summary class="small"><b>Water points along the way</b></summary><div class="poilist">${W.map((p) => row(p, 'w')).join('')}</div></details>` : ''}
+      ${F.length ? `<details><summary class="small"><b>Shops along the way</b></summary><div class="poilist">${F.map((p) => row(p, 'f')).join('')}</div></details>` : ''}
+      ${waterSafety(d.countries)}
+      <p class="small muted">km = distance into the day's route. Hours are from OpenStreetMap; small village shops often close for a long lunch and on Sunday afternoons.</p></div>`;
+  }
+
+  // ---------------------------------------------------------------- weather (Open-Meteo, free, no key)
+  const WMO = { 0: ['☀️', 'Clear'], 1: ['🌤️', 'Mostly clear'], 2: ['⛅', 'Partly cloudy'], 3: ['☁️', 'Cloudy'], 45: ['🌫️', 'Fog'], 48: ['🌫️', 'Freezing fog'],
+    51: ['🌦️', 'Light drizzle'], 53: ['🌦️', 'Drizzle'], 55: ['🌧️', 'Heavy drizzle'], 56: ['🌧️', 'Freezing drizzle'], 57: ['🌧️', 'Freezing drizzle'],
+    61: ['🌦️', 'Light rain'], 63: ['🌧️', 'Rain'], 65: ['🌧️', 'Heavy rain'], 66: ['🌧️', 'Freezing rain'], 67: ['🌧️', 'Freezing rain'],
+    71: ['🌨️', 'Light snow'], 73: ['🌨️', 'Snow'], 75: ['🌨️', 'Heavy snow'], 77: ['🌨️', 'Snow grains'], 80: ['🌦️', 'Showers'], 81: ['🌧️', 'Heavy showers'], 82: ['⛈️', 'Violent showers'],
+    85: ['🌨️', 'Snow showers'], 86: ['🌨️', 'Snow showers'], 95: ['⛈️', 'Thunderstorms'], 96: ['⛈️', 'Thunderstorms with hail'], 99: ['⛈️', 'Thunderstorms with hail'] };
+  const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  const bearing = (a, b) => { const r = Math.PI / 180, y = Math.sin((b[1] - a[1]) * r) * Math.cos(b[0] * r), x = Math.cos(a[0] * r) * Math.sin(b[0] * r) - Math.sin(a[0] * r) * Math.cos(b[0] * r) * Math.cos((b[1] - a[1]) * r); return (Math.atan2(y, x) / r + 360) % 360; };
+  function wxHtml(d, w, at) {
+    const [s, e] = w, code = e.weather_code[0], [ico, txt] = WMO[code] || ['🌡️', 'Weather'];
+    const travel = bearing(d.startLatLon, d.endLatLon), from = s.wind_direction_10m_dominant[0];
+    // wind direction is where the wind comes FROM: if that matches the way you ride, it blows in your face
+    const diff = Math.abs(((from - travel + 540) % 360) - 180);
+    const windTxt = diff < 60 ? 'mostly a <b>headwind</b>' : diff > 120 ? 'mostly a <b>tailwind</b>' : 'mostly a <b>crosswind</b>';
+    const hot = e.temperature_2m_max[0] >= 33, storm = code >= 95;
+    return `<h3>Weather ${ico}</h3>
+      <div class="grid3"><div class="stat"><b>${Math.round(e.temperature_2m_max[0])}°</b><span>high at ${esc(searchPlace(d.end))}</span></div>
+        <div class="stat"><b>${e.precipitation_probability_max[0] ?? '–'}%</b><span>chance of rain · ${e.precipitation_sum[0]} mm</span></div>
+        <div class="stat"><b>${Math.round(s.wind_speed_10m_max[0])}</b><span>km/h wind from the ${COMPASS[Math.round(from / 45) % 8]}</span></div></div>
+      <p class="small">${txt}, low ${Math.round(e.temperature_2m_min[0])}°. Gusts to ${Math.round(s.wind_gusts_10m_max[0])} km/h, ${windTxt} on the way to ${esc(short(d.end))}. UV ${Math.round(e.uv_index_max[0])}.</p>
+      ${hot ? '<p class="small" style="color:var(--signal)"><b>Hot day.</b> Start at sunrise, carry 3 L each, and sit out 1 to 4 pm in the shade.</p>' : ''}
+      ${storm ? '<p class="small" style="color:var(--signal)"><b>Thunderstorms forecast.</b> Be off high passes and ridges by early afternoon.</p>' : ''}
+      <p class="small muted">Forecast from ${new Date(at).toLocaleString('en-CA', { weekday: 'short', hour: 'numeric', minute: '2-digit' })} · weather data by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo.com</a>.</p>`;
+  }
+  async function hydrateWeather(n) {
+    const box = $('#wx'); if (!box) return;
+    const d = day(n), now = new Date(), today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const [y, m, dd] = d.iso.split('-').map(Number), until = Math.round((new Date(y, m - 1, dd) - today) / 864e5);
+    const cached = S.wx[n];
+    if (until > 15) {
+      const opens = new Date(y, m - 1, dd - 15).toLocaleDateString('en-CA', { month: 'long', day: 'numeric', year: 'numeric' });
+      box.innerHTML = `<h3>Weather</h3><p class="small">A live forecast for this day appears here from <b>${opens}</b> (16 days ahead).</p><p class="small muted">Typical ${esc(d.date.split(' ')[1])}: ${d.hi > 1500 ? 'cool mornings and afternoon storms are common up high.' : d.countries.some((c) => ['Albania', 'Greece', 'North Macedonia', 'Montenegro'].includes(c)) ? 'hot, often 30 to 35 °C inland by mid-afternoon.' : 'warm days, the odd thunderstorm.'}</p>`;
+      return;
+    }
+    if (until < 0 && !cached) { box.innerHTML = '<h3>Weather</h3><p class="small muted">This day has passed.</p>'; return; }
+    if (cached) box.innerHTML = wxHtml(d, cached.w, cached.at);
+    if (until < 0 || (cached && Date.now() - cached.at < 3 * 3600e3) || !navigator.onLine) return;
+    try {
+      const [a, b] = [d.startLatLon, d.endLatLon];
+      const u = `https://api.open-meteo.com/v1/forecast?latitude=${a[0]},${b[0]}&longitude=${a[1]},${b[1]}&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,wind_speed_10m_max,wind_gusts_10m_max,wind_direction_10m_dominant,uv_index_max&timezone=auto&start_date=${d.iso}&end_date=${d.iso}`;
+      const r = await fetch(u); if (!r.ok) throw new Error(r.status);
+      const j = await r.json(), w = [j[0].daily, j[1].daily];
+      S.wx[n] = { at: Date.now(), w }; save();
+      const bx = $('#wx'); if (bx) bx.innerHTML = wxHtml(d, w, S.wx[n].at);
+    } catch (e) { if (!cached) box.innerHTML = '<h3>Weather</h3><p class="small muted">Couldn\'t load the forecast. Try again with signal.</p>'; }
+  }
+
+  // ---------------------------------------------------------------- recap
+  function recapPage() {
+    const ridden = DAYS.filter((d) => S.ridden.includes(d.day)), written = DAYS.filter((d) => ridden.includes(d) || (S.journal[d.day] && (S.journal[d.day].text || S.journal[d.day].mood)));
+    const kmDone = ridden.reduce((a, d) => a + d.km, 0), upDone = ridden.reduce((a, d) => a + d.up, 0);
+    const moods = {}; written.forEach((d) => { const m = (S.journal[d.day] || {}).mood; if (m) moods[m] = (moods[m] || 0) + 1; });
+    const spent = S.expenses.reduce((a, e) => a + e.amount / (S.rates[e.cur] || 1), 0);
+    const stamped = K.COUNTRIES.filter((c) => ridden.some((d) => d.countries.includes(c.name)));
+    return `<div class="detail-head noprint"><button class="back" data-act="back">‹ Back</button><span style="flex:1"></span><button class="btn small" data-act="print">Print or save PDF</button></div>
+      <div class="banner" style="background:var(--ink);color:var(--paper)"><div class="eyebrow" style="color:inherit;opacity:.75">Summer 2027</div><h1 style="color:inherit">${esc(couple())}: Munich → Athens</h1>
+        <div class="num">${ridden.length} days ridden · ${fmt(kmDone)} km · ${fmt(upDone)} m climbed</div></div>
+      ${written.length ? '' : '<div class="card"><p>Your story fills in as you go: mark days as ridden and write a line or two in each day\'s journal.</p></div>'}
+      <div class="card"><div class="grid3"><div class="stat"><b>${stamped.length}</b><span>countries</span></div><div class="stat"><b>€${fmt(Math.round(spent))}</b><span>spent together</span></div><div class="stat"><b>${Object.entries(moods).sort((a, b) => b[1] - a[1]).slice(0, 3).map((x) => x[0]).join('') || '–'}</b><span>top moods</span></div></div>
+        <div style="font-size:26px;text-align:center">${stamped.map((c) => c.flag).join(' ')}</div></div>
+      ${written.map((d) => { const j = S.journal[d.day] || {}; return `<div class="card recap-day"><div class="eyebrow">Day ${d.day} · ${esc(d.date)} ${d.countries.map((c) => FLAG[c] || '').join('')}</div>
+        <h3>${esc(short(d.start))} → ${esc(short(d.end))} ${j.mood || ''}</h3><div class="num small muted">${d.km} km · ${fmt(d.up)} m up</div>
+        ${j.text ? `<p style="white-space:pre-wrap;font-family:var(--f-display)">${esc(j.text)}</p>` : ''}<div class="photos" id="rp-${d.day}"></div></div>`; }).join('')}
+      <p class="small muted" style="text-align:center">Made with our trip app</p>`;
+  }
+  async function hydrateRecap() {
+    for (const d of DAYS) {
+      const box = $(`#rp-${d.day}`); if (!box) continue;
+      const ps = (await photosFor(d.day)).slice(0, 6);
+      box.innerHTML = ps.map((p) => `<img src="${URL.createObjectURL(p.blob)}" alt="Day ${d.day} photo">`).join('');
+    }
+  }
+
+  // ---------------------------------------------------------------- phone sync + family page (Firebase Realtime Database over plain REST)
+  const SYNC_KEYS = ['names', 'ridden', 'journal', 'packed', 'extra', 'expenses', 'komoot', 'quizBest', 'rates', 'sosNotes', 'ts', 'gone', 'prep'];
+  const shareable = () => Object.fromEntries(SYNC_KEYS.map((k) => [k, S[k]]));
+  const saveLocal = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch (e) { /* ignore */ } };
+  const fb = (path) => `${S.sync.url.replace(/\/+$/, '')}/${path}.json`;
+  const newCode = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+  const DB_RE = /^https:\/\/[a-z0-9-]+\.(firebaseio\.com|[a-z0-9-]+\.firebasedatabase\.app)\/?$/i;
+  function mergeState(o) {
+    const before = JSON.stringify(shareable());
+    const ots = o.ts || {}, mts = S.ts;
+    const theirs = (k) => (ots[k] || 0) > (mts[k] || 0), neither = (k) => !ots[k] && !mts[k];
+    const pick = (k, mine, other, legacy) => (theirs(k) ? other : neither(k) ? legacy : mine);
+    const oR = new Set(o.ridden || []), mR = new Set(S.ridden);
+    S.ridden = [...new Set([...oR, ...mR])].filter((n) => pick('r' + n, mR.has(n), oR.has(n), true)).sort((a, b) => a - b);
+    Object.entries(o.journal || {}).forEach(([n, v]) => {
+      const mine = S.journal[n];
+      if (theirs('j' + n)) S.journal[n] = v;
+      else if (neither('j' + n)) {
+        if (!mine || !mine.text) S.journal[n] = { ...v, mood: (mine && mine.mood) || v.mood };
+        else if (v.text && !mine.text.includes(v.text)) S.journal[n] = { ...mine, text: `${mine.text}\n\n${v.text}`, mood: mine.mood || v.mood };
+      }
+    });
+    Object.entries(o.packed || {}).forEach(([it, v]) => { const m = S.packed[it] || [false, false]; S.packed[it] = pick('p' + it, m, v, [m[0] || v[0], m[1] || v[1]]); });
+    const oX = new Set(o.extra || []), mX = new Set(S.extra);
+    S.extra = [...new Set([...mX, ...oX])].filter((x) => pick('x' + x, mX.has(x), oX.has(x), true));
+    S.gone = [...new Set([...(S.gone || []), ...(o.gone || [])])];
+    const gone = new Set(S.gone), ids = new Set(S.expenses.map((e) => e.id));
+    (o.expenses || []).forEach((e) => { if (!ids.has(e.id)) S.expenses.push(e); });
+    S.expenses = S.expenses.filter((e) => !gone.has('e' + e.id)).sort((a, b) => a.id - b.id);
+    const oK = o.komoot || {};
+    [...new Set([...Object.keys(oK), ...Object.keys(S.komoot)])].forEach((n) => {
+      const v = pick('k' + n, S.komoot[n], oK[n], S.komoot[n] || oK[n]);
+      if (v) S.komoot[n] = v; else delete S.komoot[n];
+    });
+    if (theirs('names') && o.names && o.names[0]) S.names = o.names;
+    if (theirs('rates') && o.rates) S.rates = o.rates;
+    if (theirs('sos') || (!S.sosNotes && o.sosNotes)) S.sosNotes = o.sosNotes || '';
+    Object.entries(o.prep || {}).forEach(([id, v]) => { S.prep[id] = pick('q' + id, S.prep[id], v, S.prep[id] || v); });
+    S.quizBest = Math.max(S.quizBest, o.quizBest || 0);
+    Object.entries(ots).forEach(([k, t]) => { if (t > (mts[k] || 0)) mts[k] = t; });
+    return JSON.stringify(shareable()) !== before;
+  }
+  function summary() {
+    const r = DAYS.filter((d) => S.ridden.includes(d.day));
+    return { names: S.names, ridden: S.ridden, km: r.reduce((a, d) => a + d.km, 0), up: r.reduce((a, d) => a + d.up, 0), at: Date.now() };
+  }
+  let syncing = false;
+  async function syncNow(manual) {
+    if (!S.sync || syncing) return;
+    if (!navigator.onLine) { if (manual) toast('No internet right now'); return; }
+    syncing = true;
+    try {
+      const r = await fetch(fb(`trips/${S.sync.trip}/phones`)); if (!r.ok) throw new Error(r.status);
+      const all = (await r.json()) || {};
+      let changed = false;
+      Object.entries(all).forEach(([id, v]) => {
+        if (id === S.sync.phone || !v || !v.state) return;
+        try {
+          const o = JSON.parse(v.state);
+          if (S.sync.adopt && o.names && o.names[0]) { S.names = o.names; S.ts.names = Math.max(S.ts.names || 0, (o.ts || {}).names || 0); changed = true; } // joining phone takes the trip's rider order
+          if (mergeState(o)) changed = true;
+        } catch (e) { /* bad row */ }
+      });
+      if (S.sync.adopt && Object.keys(all).some((id) => id !== S.sync.phone)) delete S.sync.adopt;
+      const put = (p, body) => fetch(fb(p), { method: 'PUT', body: JSON.stringify(body) }).then((x) => { if (!x.ok) throw new Error(x.status); });
+      await put(`trips/${S.sync.trip}/phones/${S.sync.phone}`, { at: Date.now(), state: JSON.stringify(shareable()) });
+      await put(`follow/${S.sync.follow}/summary`, summary());
+      while (S.ciQueue && S.ciQueue.length) {
+        const q = await fetch(fb(`follow/${S.sync.follow}/checkins`), { method: 'POST', body: JSON.stringify(S.ciQueue[0]) });
+        if (!q.ok) break; S.ciQueue.shift();
+      }
+      S.sync.last = Date.now(); saveLocal();
+      if (changed) { const a = document.activeElement; if (!a || !/INPUT|TEXTAREA|SELECT/.test(a.tagName)) render(); }
+      if (manual) toast(changed ? 'Synced: got updates from the other phone' : 'Synced');
+      else if (changed) toast('Updated from the other phone');
+      const st = $('#syncStatus'); if (st) st.textContent = syncStatusText();
+    } catch (e) { if (manual) toast("Couldn't reach the sync database. Check the link and the rules."); }
+    syncing = false;
+  }
+  const ago = (t) => { const m = Math.round((Date.now() - t) / 6e4); return m < 1 ? 'just now' : m < 60 ? `${m} min ago` : m < 1440 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`; };
+  const syncStatusText = () => (S.sync && S.sync.last ? `Last synced ${ago(S.sync.last)}` : 'Not synced yet');
+  const followLink = () => `${location.origin}${location.pathname.replace(/[^/]*$/, '')}follow.html#${encodeURIComponent(S.sync.url)}~${S.sync.follow}`;
+  const pairCode = () => `${S.sync.url}~${S.sync.trip}~${S.sync.follow}`;
+  function checkinCard() {
+    if (!S.sync) return `<div class="card"><h2>Let the family follow along</h2><p class="small">Set up free sync once and both phones share ticks, journals and spending. Your family gets a link to a page with your check-ins on the map.</p><button class="btn ghost small" data-gokit="sync">Set it up</button></div>`;
+    const last = (S.checkins || [])[0];
+    return `<div class="card" style="border-color:var(--sea);border-width:2px"><h2>Check in for the family</h2>
+      <p class="small muted">Sends where you are now, a short message and an optional photo to the family page.${last ? ` Last check-in ${ago(last.at)}.` : ''}${(S.ciQueue || []).length ? ` ${S.ciQueue.length} waiting for signal.` : ''}</p>
+      <input type="text" id="ciMsg" maxlength="200" placeholder="Made it over the pass! Gelato time.">
+      <div class="row between"><label class="btn ghost small" for="ciPhoto" style="cursor:pointer" id="ciPhotoLab">Add a photo</label><input type="file" id="ciPhoto" accept="image/*" hidden>
+      <button class="btn sea" data-act="checkin">📍 Check in</button></div></div>`;
+  }
+  let ciBlob = null;
+  async function doCheckin(btn) {
+    btn.disabled = true; btn.textContent = 'Finding you…';
+    const st = status(), d = st.ride || DAYS.find((x) => !S.ridden.includes(x.day));
+    const pos = await new Promise((res) => {
+      if (!navigator.geolocation) return res(null);
+      navigator.geolocation.getCurrentPosition((p) => res(p.coords), () => res(null), { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+    });
+    const c = { at: Date.now(), who: couple(), msg: ($('#ciMsg') || {}).value || '', day: d ? d.day : null };
+    if (pos) { c.lat = Math.round(pos.latitude * 1e5) / 1e5; c.lon = Math.round(pos.longitude * 1e5) / 1e5; }
+    if (ciBlob) c.photo = await new Promise((r) => { const fr = new FileReader(); fr.onload = () => r(fr.result); fr.readAsDataURL(ciBlob); });
+    S.ciQueue = [...(S.ciQueue || []), c];
+    S.checkins = [{ at: c.at, msg: c.msg, lat: c.lat, lon: c.lon, day: c.day }, ...(S.checkins || [])].slice(0, 60);
+    ciBlob = null; saveLocal();
+    await syncNow(false);
+    toast((S.ciQueue || []).length ? 'Saved: it sends when you have signal' : pos ? 'Checked in!' : 'Checked in (no location: allow location for the map pin)');
+    render();
+  }
+  const shrinkSmall = (file) => new Promise((res) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => { const k = Math.min(1, 520 / Math.max(img.width, img.height)), cv = document.createElement('canvas'); cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k); cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url); cv.toBlob((b) => res(b), 'image/jpeg', 0.6); };
+    img.onerror = () => { URL.revokeObjectURL(url); res(null); };
+    img.src = url;
+  });
+  const RULES = '{\n  "rules": {\n    "trips":  { "$code": { ".read": "$code.length >= 12", ".write": "$code.length >= 12" } },\n    "follow": { "$code": { ".read": "$code.length >= 12", ".write": "$code.length >= 12" } }\n  }\n}';
+  function syncHtml() {
+    if (!S.sync) {
+      return `<div class="card"><h3>Sync the two phones and share with family</h3>
+        <p class="small">Free, once, about 10 minutes, on one phone or a computer. You make your own small database at Google Firebase (free plan, no credit card).</p>
+        <ol class="small steps"><li>Go to <a href="https://console.firebase.google.com/" target="_blank" rel="noopener">console.firebase.google.com</a>, sign in with a Google account and tap <b>Create a project</b>. Name it <i>our-trip</i>; you can turn Google Analytics off.</li>
+          <li>In the menu open <b>Build → Realtime Database → Create database</b>. Pick the <b>Belgium (europe-west1)</b> location and <b>Start in locked mode</b>.</li>
+          <li>Open the <b>Rules</b> tab, replace everything with the rules below and tap <b>Publish</b>.</li>
+          <li>Back on the <b>Data</b> tab, copy the database link at the top (it ends in <i>firebaseio.com</i> or <i>firebasedatabase.app</i>) and paste it here.</li></ol>
+        <pre class="code" id="rulesTxt">${esc(RULES)}</pre><button class="chip" data-act="copy-rules">Copy the rules</button>
+        <form id="syncNew" class="col"><label class="field" for="dbUrl">Database link<input type="text" id="dbUrl" inputmode="url" placeholder="https://our-trip-xxxx-default-rtdb.europe-west1.firebasedatabase.app"></label>
+          <button class="btn" type="submit">Create our trip</button></form></div>
+        <form class="card" id="syncJoin"><h3>The other phone already set it up?</h3><p class="small">On that phone open Toolkit → Sync & family and send yourself the pair code. Paste it here.</p>
+          <input type="text" id="pairIn" placeholder="https://…~abcd…~efgh…"><button class="btn ghost" type="submit">Join our trip</button></form>
+        <div class="card"><h3>What gets shared</h3><p class="small">The phones share ridden days, journals and moods, packing ticks, prep ticks, spending and Komoot links. Photos stay on each phone (use Backup to copy them). The family page only shows your names, ridden days and the check-ins you choose to send. Anyone with the family link can see that page, so share it only with family.</p></div>`;
+    }
+    return `<div class="card" style="border-color:var(--ok);border-width:2px"><h3>✓ Sync is on</h3><p class="small" id="syncStatus">${syncStatusText()}</p>
+        <p class="small muted">Syncs by itself a few seconds after a change and each time you open the app with signal. If both of you edit the same thing, the newest change wins.</p>
+        <button class="btn" data-act="sync-now">Sync now</button></div>
+      <div class="card"><h3>Family link</h3><p class="small">Send this to family. It opens a page with your progress, your check-ins on a map and your messages. It is not live GPS: it updates when you tap Check in on the Us tab.</p>
+        <input type="text" readonly value="${esc(followLink())}" id="followTxt"><div class="row"><button class="btn small" data-act="share-follow">Share the link</button><a class="btn small ghost" href="${esc(followLink())}" target="_blank" rel="noopener">Open it</a></div></div>
+      <div class="card"><h3>Pair the other phone</h3><p class="small">Send this code to the other phone, then paste it there under Toolkit → Sync & family → Join our trip.</p>
+        <input type="text" readonly value="${esc(pairCode())}" id="pairTxt"><button class="btn small ghost" data-act="share-pair">Share the pair code</button></div>
+      <div class="card"><h3>Stop syncing on this phone</h3><p class="small muted">Keeps everything on this phone; it just stops talking to the database.</p><button class="btn ghost small" data-act="sync-off">Turn off sync here</button></div>`;
+  }
+
+  // ---------------------------------------------------------------- offline maps (Clean style tiles, zoom 8 to 13 along each week's route)
+  const OFF_CACHE = 'ourtrip-offline';
+  function tilesForWeek(w) {
+    const set = new Set();
+    DAYS.filter((d) => d.week === w).forEach((d) => d.line.forEach((seg) => {
+      for (let z = 8; z <= 13; z++) {
+        const n = 2 ** z, r = z >= 12 ? 1 : 0;
+        for (let i = 0; i < seg.length; i++) {
+          const a = seg[i], b = seg[i + 1] || a;
+          const ax = TripMap.lonX(a[1]) * n, ay = TripMap.latY(a[0]) * n, bx = TripMap.lonX(b[1]) * n, by = TripMap.latY(b[0]) * n;
+          const steps = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay) * 3));
+          for (let s = 0; s <= steps; s++) {
+            const x = Math.floor(ax + ((bx - ax) * s) / steps), y = Math.floor(ay + ((by - ay) * s) / steps);
+            for (let dx = -r; dx <= r; dx++) for (let dy = -r; dy <= r; dy++) set.add(`${z}/${x + dx}/${y + dy}`);
+          }
+        }
+      }
+    }));
+    return [...set];
+  }
+  const TILE_COUNT = {};
+  const tileCount = (w) => TILE_COUNT[w] || (TILE_COUNT[w] = tilesForWeek(w).length);
+  let dl = null;
+  async function downloadWeek(w) {
+    if (!('caches' in window)) return toast('Offline maps need the home-screen app');
+    if (dl) return toast('One week at a time');
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+    const list = tilesForWeek(w), cache = await caches.open(OFF_CACHE);
+    dl = { w, done: 0, total: list.length, fail: 0 };
+    const prog = () => { const p = $(`#off-${w}`); if (p) p.textContent = `Downloading ${dl.done}/${dl.total}…`; };
+    let i = 0;
+    const worker = async () => {
+      while (i < list.length) {
+        const [z, x, y] = list[i++].split('/').map(Number);
+        const url = TripMap.PROVIDERS.clean.url(z, x, y, x + y, false);
+        try {
+          if (!(await cache.match(url))) {
+            let res = await fetch(url, { mode: 'cors' }).catch(() => null);
+            if (!res || !res.ok) res = await fetch(url, { mode: 'no-cors' });
+            await cache.put(url, res);
+          }
+        } catch (e) { dl.fail++; }
+        dl.done++; if (dl.done % 10 === 0) prog();
+      }
+    };
+    await Promise.all([1, 2, 3, 4].map(worker));
+    S.offline[w] = { n: dl.total - dl.fail, at: Date.now() }; save();
+    toast(dl.fail ? `Week ${w}: ${dl.fail} tiles failed, tap again to retry` : `Week ${w} saved for offline`);
+    dl = null; if (tab === 'kit') render();
+  }
+  function offlineHtml() {
+    return `<div class="card"><h3>Offline maps</h3>
+        <p class="small">Download each week's map on Wi-Fi before you go. It saves the <b>Clean</b> map style (tap 🗺️ on the map to switch) in a strip along the route, zoomed in far enough to read village streets. About 10 to 25 MB per week.</p>
+        <p class="small muted">Do this inside the home-screen app, not in Safari: on iPhone they keep separate storage. Day pages, stories, phrases and your journal always work offline anyway.</p></div>
+      <div class="card">${WEEKS.map((w) => { const o = S.offline[w.week]; return `<div class="pk"><span><b>Week ${w.week}</b> · ${esc(w.name)}<br><small class="muted" id="off-${w.week}">${dl && dl.w === w.week ? 'Downloading…' : o ? `✓ Saved ${new Date(o.at).toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })} · ${fmt(o.n)} tiles` : `${fmt(tileCount(w.week))} tiles, about ${Math.round(tileCount(w.week) * 0.016)} MB`}</small></span>
+        <button class="btn small ${o ? 'ghost' : ''}" data-offline="${w.week}">${o ? 'Update' : 'Download'}</button></div>`; }).join('')}</div>
+      <div class="card"><p class="small muted" id="storeUse"></p><button class="btn ghost small" data-act="offline-clear">Delete downloaded maps</button></div>`;
+  }
+
+  // ---------------------------------------------------------------- prep checklist
+  function prepItems() {
+    const ferryDays = DAYS.filter((d) => d.ferry);
+    const restDays = RESTS.map((r) => ({ id: 'rest' + r.day, t: `Room for the rest day in ${short(r.place)} (night of ${new Date(addDays(r.iso, -1) + 'T12:00').toLocaleDateString('en-CA', { month: 'short', day: 'numeric' })}, 2 nights)` }));
+    return [
+      { g: 'Entry rules (Canadian passports)', items: [
+        { id: 'pass', t: 'Passports valid until at least mid-November 2027 (3 months after you leave) and issued less than 10 years ago' },
+        { id: 'etias', t: 'ETIAS: not running yet (no launch date as of November 2026). When it starts: €20, valid 3 years, apply only on the official EU site. Check again in early 2027.', link: 'https://travel-europe.europa.eu/etias_en' },
+        { id: 'ees', t: 'EES: since October 2025 the EU registers your fingerprints and photo at your first Schengen border (Munich airport) and checks them again when you cross into Greece from Albania. Allow extra time at both.', link: 'https://travel-europe.europa.eu/ees_en' },
+        { id: 'balkan', t: 'Bosnia, Montenegro, Albania and North Macedonia are outside Schengen and visa-free for Canadians for up to 90 days. Days there do not count toward Schengen.' },
+      ] },
+      { g: 'Insurance and health', items: [
+        { id: 'ins', t: 'Travel medical insurance that covers cycling and all 10 countries, including the 4 non-EU ones. Your provincial plan covers very little abroad.' },
+        { id: 'bikeins', t: 'Theft cover for the bikes and gear (home insurance rider or a separate policy)' },
+        { id: 'clinic', t: 'Travel clinic visit: ask about tick-borne encephalitis (ticks in Austria and Slovenia) and rabies (stray dogs in the Balkans)' },
+        { id: 'tabs', t: 'Water purification tablets to go with the filter' },
+      ] },
+      { g: 'Phones and navigation', items: [
+        { id: 'esim', t: 'eSIM or plan that covers the EU and the Balkans. EU roaming deals often leave out Bosnia, Montenegro, Albania and North Macedonia, so check the country list.' },
+        { id: 'offmaps', t: 'Offline maps downloaded for all 11 weeks (Toolkit → Offline maps)' },
+        { id: 'komoot', t: 'Komoot regions unlocked, the 64 day tours imported and set to available offline' },
+        { id: 'syncset', t: 'Phone sync set up and the family link sent' },
+        { id: 'ws', t: 'Warmshowers profiles filled in with photos, so hosts say yes', link: 'https://www.warmshowers.org/' },
+      ] },
+      { g: 'Bookings', items: [
+        { id: 'munich', t: 'Munich hotel, June 2 and 3 (2 nights), with room for two bike boxes' },
+        { id: 'flighthome', t: 'Flight home from Athens (Aug 17 or later), with bike fees paid' },
+        { id: 'boxes', t: 'Plan for bike boxes in Athens: ask a bike shop near the finish to save two' },
+        ...restDays,
+        ...ferryDays.map((d) => ({ id: 'ferry' + d.day, t: `Day ${d.day}, ${d.date}: ${d.ferry}`, link: ferryLink(d.ferry.split(';')[0].trim()) })),
+      ] },
+      { g: 'Money', items: [
+        { id: 'card', t: 'A credit card with no foreign transaction fee, plus a backup card kept in a different bag' },
+        { id: 'cash', t: 'Cash: euros work in 7 countries (Germany, Austria, Italy, Slovenia, Croatia, Montenegro, Greece); get marks in Bosnia, lek in Albania and denars in North Macedonia from ATMs there' },
+      ] },
+    ];
+  }
+  function schengenCard() {
+    const SCH = ['Germany', 'Austria', 'Italy', 'Slovenia', 'Croatia', 'Greece'];
+    let n = 2; // Munich days
+    for (let k = 1; k <= 74; k++) { const d = day(k) || day(k - 1); const cs = day(k) ? d.countries : d.countries.slice(-1); if (cs.some((c) => SCH.includes(c))) n++; }
+    n++; // flight-home day from Athens
+    return `<div class="card" style="border-color:var(--ok);border-width:2px"><h3>Schengen 90/180 check</h3>
+      <div class="row between"><span style="font:700 40px var(--f-mono)">${n}</span><span class="small" style="flex:1">days in the Schengen area on this plan, counting arrival and departure days. The limit is 90 in any 180 days, so you have about ${90 - n} days to spare.</span></div>
+      <p class="small muted">In Schengen: Jun 2 to Jul 10 (Germany to Croatia) and Aug 6 to the flight home (Greece). Outside: Bosnia, Montenegro, Albania and North Macedonia.</p></div>`;
+  }
+  function prepHtml() {
+    const groups = prepItems(), all = groups.flatMap((g) => g.items), done = all.filter((i) => S.prep[i.id]).length;
+    return `<div class="card"><div class="row between"><h3>Before we go</h3><span class="num small muted">${done}/${all.length}</span></div><div class="bar"><i style="width:${(100 * done / all.length).toFixed(1)}%"></i></div></div>
+      ${schengenCard()}
+      ${groups.map((g) => `<div class="card"><h3>${esc(g.g)}</h3>${g.items.map((i) => `<label class="pk ${S.prep[i.id] ? 'done' : ''}"><input type="checkbox" data-prep="${i.id}" ${S.prep[i.id] ? 'checked' : ''}><span>${esc(i.t)}${i.link ? ` <a href="${esc(i.link)}" target="_blank" rel="noopener">link</a>` : ''}</span></label>`).join('')}</div>`).join('')}
+      <p class="small muted">Rules change. Check the official EU and Government of Canada travel pages a month before you fly.</p>`;
   }
 
   // ---------------------------------------------------------------- explore
@@ -518,10 +943,11 @@
   // ---------------------------------------------------------------- toolkit
   let kitTab = 'pack';
   function kitPage() {
-    const sub = { pack: packHtml, money: moneyHtml, sos: sosHtml, backup: backupHtml }[kitTab]();
+    const SUBS = [['pack', 'Packing', packHtml], ['prep', 'Prep', prepHtml], ['money', 'Money split', moneyHtml], ['sync', 'Sync & family', syncHtml], ['offline', 'Offline maps', offlineHtml], ['sos', 'Emergency', sosHtml], ['backup', 'Backup', backupHtml]];
+    const sub = (SUBS.find((x) => x[0] === kitTab) || SUBS[0])[2]();
+    if (kitTab === 'offline' && navigator.storage && navigator.storage.estimate) navigator.storage.estimate().then((e) => { const el = $('#storeUse'); if (el) el.textContent = `This app is using about ${Math.round(e.usage / 1e6)} MB on this phone.`; }).catch(() => {});
     return `<h1>Toolkit</h1>
-      <div class="chips"><button class="chip" data-kit="pack" aria-pressed="${kitTab === 'pack'}">Packing</button><button class="chip" data-kit="money" aria-pressed="${kitTab === 'money'}">Money split</button>
-      <button class="chip" data-kit="sos" aria-pressed="${kitTab === 'sos'}">Emergency</button><button class="chip" data-kit="backup" aria-pressed="${kitTab === 'backup'}">Backup & sync</button></div>${sub}`;
+      <div class="chips">${SUBS.map(([k, l]) => `<button class="chip" data-kit="${k}" aria-pressed="${kitTab === k}">${l}</button>`).join('')}</div>${sub}`;
   }
   function packHtml() {
     const groups = [...K.PACKING, { group: 'Our extras', items: S.extra }];
@@ -570,7 +996,7 @@
   }
   function backupHtml() {
     return `<div class="card"><h3>Copy everything to the other phone</h3>
-        <p class="small">Each phone keeps its own copy. Export here, send the file to the other phone (AirDrop, Messages), then import it there. Imports merge: nothing gets deleted.</p>
+        <p class="small">Sync & family keeps the phones matched automatically, but not photos. To copy photos too, or to keep a safety copy, export here, send the file to the other phone (AirDrop, Messages) and import it there. Imports merge: the newest change wins.</p>
         <label class="field" for="incPhotos"><span><input type="checkbox" id="incPhotos"> Include photos (bigger file)</span></label>
         <button class="btn" data-act="export">Export our trip</button>
         <label class="btn ghost" for="importFile" style="cursor:pointer">Import from the other phone</label><input type="file" id="importFile" accept="application/json,.json" hidden></div>
@@ -578,8 +1004,7 @@
         <p class="small">${Object.keys(S.komoot).length} of ${DAYS.length} riding days linked. Paste all your tour links at once, in day order (Day 1 first). Each link goes to the next riding day.</p>
         <textarea id="komootList" placeholder="https://www.komoot.com/tour/111...&#10;https://www.komoot.com/tour/222..."></textarea>
         <label class="field" for="komootStart">Start at riding day<input type="number" id="komootStart" min="1" max="74" value="1"></label>
-        <button class="btn" type="submit">Link these tours</button></form>
-      <div class="card"><h3>Offline maps</h3><p class="small">Map tiles you've looked at are saved for offline use. Before you leave, open the map on Wi-Fi and zoom through each week once. The route, stops and all the stories always work offline.</p></div>`;
+        <button class="btn" type="submit">Link these tours</button></form>`;
   }
   function settingsPage() {
     return `<div class="detail-head"><button class="back" data-act="back">‹ Back</button></div><h1>Settings</h1>
@@ -615,27 +1040,17 @@
     try {
       const data = JSON.parse(await file.text());
       if (data.app !== 'ourtrip') throw new Error('not ours');
-      const o = data.state || {};
-      S.ridden = [...new Set([...(S.ridden || []), ...(o.ridden || [])])];
-      Object.entries(o.journal || {}).forEach(([k, v]) => {
-        const mine = S.journal[k];
-        if (!mine || !mine.text) S.journal[k] = v;
-        else if (v.text && !mine.text.includes(v.text)) S.journal[k] = { ...mine, text: `${mine.text}\n\n${v.text}`, mood: mine.mood || v.mood };
-      });
-      Object.entries(o.packed || {}).forEach(([k, v]) => { const m = S.packed[k] || [false, false]; S.packed[k] = [m[0] || v[0], m[1] || v[1]]; });
-      S.extra = [...new Set([...(S.extra || []), ...(o.extra || [])])];
-      const ids = new Set(S.expenses.map((e) => e.id)); (o.expenses || []).forEach((e) => { if (!ids.has(e.id)) S.expenses.push(e); });
-      S.komoot = { ...(o.komoot || {}), ...S.komoot };
-      S.quizBest = Math.max(S.quizBest, o.quizBest || 0);
-      if (!S.sosNotes && o.sosNotes) S.sosNotes = o.sosNotes;
-      for (const p of data.photos || []) { const b = await (await fetch(p.data)).blob(); await addPhotoBlob(p.day, b); }
+      mergeState(data.state || {});
+      const have = new Set();
+      for (const d of DAYS) (await photosFor(d.day)).forEach((p) => have.add(`${p.day}:${p.at}`));
+      for (const p of data.photos || []) { if (have.has(`${p.day}:${p.at}`)) continue; const b = await (await fetch(p.data)).blob(); await addPhotoBlob(p.day, b, p.at); }
       save(); render(); toast('Imported and merged');
     } catch (e) { toast("That file isn't an Our Trip backup"); }
   }
 
   // ---------------------------------------------------------------- events
   document.addEventListener('click', async (e) => {
-    const t = e.target.closest('[data-tab],[data-push],[data-go-day],[data-country],[data-place],[data-act],[data-week],[data-opt],[data-kit],[data-pack],[data-unextra],[data-unexp],[data-mood],[data-cat],[data-say],[data-map-day]');
+    const t = e.target.closest('[data-tab],[data-push],[data-go-day],[data-country],[data-place],[data-act],[data-week],[data-opt],[data-kit],[data-pack],[data-unextra],[data-unexp],[data-mood],[data-cat],[data-say],[data-map-day],[data-gokit],[data-offline]');
     if (!t) return;
     const ds = t.dataset;
     if (ds.tab) { if (tab === 'map') rememberView(); return go(ds.tab); }
@@ -647,17 +1062,19 @@
     if (ds.week !== undefined) { return setWeek(ds.week ? +ds.week : null); }
     if (ds.cat !== undefined) { exploreCat = ds.cat || null; return render(); }
     if (ds.kit) { kitTab = ds.kit; return render(); }
+    if (ds.gokit) { kitTab = ds.gokit; return go('kit'); }
+    if (ds.offline) return downloadWeek(+ds.offline);
     if (ds.opt !== undefined) { if (Q.picked === null) { Q.picked = +ds.opt; if (Q.picked === Q.qs[Q.i].answer) Q.score++; render(); } return; }
-    if (ds.pack) { const w = +ds.w, cur = S.packed[ds.pack] || [false, false]; cur[w] = !cur[w]; S.packed[ds.pack] = cur; save(); return render(); }
-    if (ds.unextra) { S.extra = S.extra.filter((x) => x !== ds.unextra); save(); return render(); }
-    if (ds.unexp) { S.expenses = S.expenses.filter((x) => String(x.id) !== ds.unexp); save(); return render(); }
-    if (ds.mood) { const n = stack[stack.length - 1].day; S.journal[n] = { ...(S.journal[n] || {}), mood: ds.mood }; save(); document.querySelectorAll('[data-mood]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mood === ds.mood)); return; }
+    if (ds.pack) { const w = +ds.w, cur = S.packed[ds.pack] || [false, false]; cur[w] = !cur[w]; S.packed[ds.pack] = cur; touch('p' + ds.pack); save(); return render(); }
+    if (ds.unextra) { S.extra = S.extra.filter((x) => x !== ds.unextra); touch('x' + ds.unextra); save(); return render(); }
+    if (ds.unexp) { S.expenses = S.expenses.filter((x) => String(x.id) !== ds.unexp); S.gone.push('e' + ds.unexp); save(); return render(); }
+    if (ds.mood) { const n = stack[stack.length - 1].day; S.journal[n] = { ...(S.journal[n] || {}), mood: ds.mood }; touch('j' + n); save(); document.querySelectorAll('[data-mood]').forEach((b) => b.setAttribute('aria-pressed', b.dataset.mood === ds.mood)); return; }
     if (ds.say) { try { const u = new SpeechSynthesisUtterance(ds.say); u.lang = ds.lang; u.rate = 0.85; speechSynthesis.cancel(); speechSynthesis.speak(u); } catch (err) { /* no voice */ } return; }
     switch (ds.act) {
       case 'back': return back();
       case 'fact': { const f = allFacts(); $('#fact').textContent = f[Math.floor(Math.random() * f.length)]; return; }
       case 'share-fact': { const msg = $('#fact').textContent + '\n\nfrom our Munich → Athens bike trip'; if (navigator.share) navigator.share({ text: msg }).catch(() => {}); else { navigator.clipboard && navigator.clipboard.writeText(msg).then(() => toast('Copied'), () => {}); } return; }
-      case 'toggle-done': { const n = stack[stack.length - 1].day; S.ridden = S.ridden.includes(n) ? S.ridden.filter((x) => x !== n) : [...S.ridden, n]; save(); render(); if (S.ridden.includes(n)) toast(`Day ${n} done!`); return; }
+      case 'toggle-done': { const n = stack[stack.length - 1].day; S.ridden = S.ridden.includes(n) ? S.ridden.filter((x) => x !== n) : [...S.ridden, n]; touch('r' + n); save(); render(); if (S.ridden.includes(n)) toast(`Day ${n} done!`); return; }
       case 'share-day': { const d = day(stack[stack.length - 1].day); const msg = `Day ${d.day} of our Munich → Athens ride: ${short(d.start)} to ${short(d.end)}, ${d.km} km and ${fmt(d.up)} m of climbing.${$('#jt').value ? '\n\n' + $('#jt').value : ''}`; if (navigator.share) navigator.share({ text: msg }).catch(() => {}); else navigator.clipboard && navigator.clipboard.writeText(msg).then(() => toast('Copied'), () => {}); return; }
       case 'quiz-next': { if (Q.i + 1 >= Q.qs.length && Q.score > S.quizBest) { S.quizBest = Q.score; save(); } Q.i++; Q.picked = null; return render(); }
       case 'quiz-again': Q = null; return render();
@@ -670,10 +1087,18 @@
         navigator.geolocation.getCurrentPosition((p) => { mapState.me = { lat: p.coords.latitude, lon: p.coords.longitude }; if (mapInst) mapInst.centerOn(mapState.me.lat, mapState.me.lon, Math.max(mapInst.z, 10)); },
           () => toast('Allow location to see where you are'), { enableHighAccuracy: true, timeout: 10000 });
         return;
-      case 'komoot-clear': delete S.komoot[stack[stack.length - 1].day]; save(); return render();
+      case 'komoot-clear': { const n = stack[stack.length - 1].day; delete S.komoot[n]; touch('k' + n); save(); return render(); }
+      case 'print': return window.print();
+      case 'checkin': return doCheckin(t);
+      case 'sync-now': return syncNow(true);
+      case 'sync-off': S.sync = null; save(); toast('Sync turned off on this phone'); return render();
+      case 'copy-rules': navigator.clipboard && navigator.clipboard.writeText(RULES).then(() => toast('Rules copied'), () => {}); return;
+      case 'share-follow': { const u = followLink(); if (navigator.share) navigator.share({ title: 'Follow our bike trip', text: 'Follow our Munich to Athens bike trip:', url: u }).catch(() => {}); else navigator.clipboard && navigator.clipboard.writeText(u).then(() => toast('Link copied'), () => {}); return; }
+      case 'share-pair': { const c = pairCode(); if (navigator.share) navigator.share({ text: c }).catch(() => {}); else navigator.clipboard && navigator.clipboard.writeText(c).then(() => toast('Pair code copied'), () => {}); return; }
+      case 'offline-clear': if ('caches' in window) await caches.delete(OFF_CACHE); S.offline = {}; save(); toast('Downloaded maps deleted'); return render();
       case 'export': return exportTrip();
       case 'reset-ask': $('#resetConfirm').innerHTML = '<div class="row"><button class="btn small" data-act="reset-yes">Yes, reset</button><button class="btn small ghost" data-act="reset-no">Keep it</button></div>'; return;
-      case 'reset-yes': S.ridden = []; S.packed = {}; save(); toast('Progress reset'); return back();
+      case 'reset-yes': S.ridden.forEach((n) => touch('r' + n)); Object.keys(S.packed).forEach((k) => touch('p' + k)); S.ridden = []; S.packed = {}; save(); toast('Progress reset'); return back();
       case 'reset-no': $('#resetConfirm').innerHTML = ''; return;
       default:
     }
@@ -690,7 +1115,7 @@
     if (f.id === 'nameForm' || f.id === 'setForm') {
       const a = (f.id === 'nameForm' ? $('#n1') : $('#s1')).value.trim(), b = (f.id === 'nameForm' ? $('#n2') : $('#s2')).value.trim();
       if (!a || !b) { toast('Add both names'); return; }
-      S.names = [a, b];
+      S.names = [a, b]; if (f.id === 'setForm') touch('names');
       if (f.id === 'setForm') { S.theme = $('#sTheme').value; applyTheme(); }
       save();
       if (f.id === 'setForm') { toast('Saved'); back(); } else render();
@@ -698,17 +1123,27 @@
     if (f.id === 'komootForm') {
       const m = ($('#komootIn').value.match(KOMOOT_RE) || [])[0];
       if (!m) { toast('Paste a komoot.com link'); return; }
-      S.komoot[stack[stack.length - 1].day] = m; save(); render(); toast('Komoot tour linked');
+      S.komoot[stack[stack.length - 1].day] = m; touch('k' + stack[stack.length - 1].day); save(); render(); toast('Komoot tour linked');
     }
     if (f.id === 'komootBulk') {
       const urls = $('#komootList').value.match(KOMOOT_RE) || [];
       if (!urls.length) { toast('No Komoot links found'); return; }
       const startDay = parseInt($('#komootStart').value, 10) || 1;
       const ride = DAYS.filter((d) => d.day >= startDay);
-      urls.forEach((u, i) => { if (ride[i]) S.komoot[ride[i].day] = u; });
+      urls.forEach((u, i) => { if (ride[i]) { S.komoot[ride[i].day] = u; touch('k' + ride[i].day); } });
       save(); render(); toast(`Linked ${Math.min(urls.length, ride.length)} days`);
     }
-    if (f.id === 'extraForm') { const v = $('#extraIn').value.trim(); if (v && !S.extra.includes(v)) { S.extra.push(v); save(); } render(); }
+    if (f.id === 'extraForm') { const v = $('#extraIn').value.trim(); if (v && !S.extra.includes(v)) { S.extra.push(v); touch('x' + v); save(); } render(); }
+    if (f.id === 'syncNew') {
+      const u = $('#dbUrl').value.trim().replace(/\/+$/, '');
+      if (!DB_RE.test(u + '/')) { toast('Paste the database link from Firebase'); return; }
+      S.sync = { url: u, trip: newCode(), follow: newCode(), phone: newCode(), last: 0 }; save(); syncNow(true); render();
+    }
+    if (f.id === 'syncJoin') {
+      const p = $('#pairIn').value.trim().split('~');
+      if (p.length !== 3 || !DB_RE.test(p[0].replace(/\/+$/, '') + '/') || p[1].length < 12 || p[2].length < 12) { toast("That doesn't look like a pair code"); return; }
+      S.sync = { url: p[0].replace(/\/+$/, ''), trip: p[1], follow: p[2], phone: newCode(), last: 0 }; S.sync.adopt = true; save(); syncNow(true); render();
+    }
     if (f.id === 'expForm') {
       const amt = parseFloat($('#exAmt').value);
       if (!(amt > 0)) return;
@@ -717,9 +1152,9 @@
     }
   });
   document.addEventListener('input', (e) => {
-    if (e.target.id === 'jt') { const n = stack[stack.length - 1].day; S.journal[n] = { ...(S.journal[n] || {}), text: e.target.value }; save(); }
-    if (e.target.id === 'sosNotes') { S.sosNotes = e.target.value; save(); }
-    if (e.target.dataset.rate) { const v = parseFloat(e.target.value); if (v > 0) { S.rates[e.target.dataset.rate] = v; save(); } }
+    if (e.target.id === 'jt') { const n = stack[stack.length - 1].day; S.journal[n] = { ...(S.journal[n] || {}), text: e.target.value }; touch('j' + n); save(); }
+    if (e.target.id === 'sosNotes') { S.sosNotes = e.target.value; touch('sos'); save(); }
+    if (e.target.dataset.rate) { const v = parseFloat(e.target.value); if (v > 0) { S.rates[e.target.dataset.rate] = v; touch('rates'); save(); } }
   });
   document.addEventListener('change', async (e) => {
     if (e.target.id === 'pf') {
@@ -728,9 +1163,14 @@
       e.target.value = ''; hydrateDay(n); toast('Photos added');
     }
     if (e.target.id === 'importFile' && e.target.files[0]) importTrip(e.target.files[0]);
+    if (e.target.dataset.prep) { const id = e.target.dataset.prep; S.prep[id] = e.target.checked; touch('q' + id); save(); e.target.closest('.pk').classList.toggle('done', e.target.checked); }
+    if (e.target.id === 'ciPhoto' && e.target.files[0]) { ciBlob = await shrinkSmall(e.target.files[0]); const l = $('#ciPhotoLab'); if (l) l.textContent = ciBlob ? '✓ Photo added' : 'Add a photo'; }
   });
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { if (mapInst) mapInst.draw(); });
 
   render();
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if (S.sync) syncNow(false);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.sync) syncNow(false); });
+  window.addEventListener('online', () => { if (S.sync) syncNow(false); });
 })();

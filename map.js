@@ -154,7 +154,7 @@
       this.hits = [];
       // ferries
       ctx.setLineDash([6, 6]); ctx.lineWidth = 2.2; ctx.strokeStyle = L.seaColor;
-      L.ferries.forEach((f) => { ctx.beginPath(); f.pts.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }); ctx.stroke(); });
+      (L.ferries || []).forEach((f) => { ctx.beginPath(); f.pts.forEach(([x, y], i) => { const [sx, sy] = this.toScreen(x, y); i ? ctx.lineTo(sx, sy) : ctx.moveTo(sx, sy); }); ctx.stroke(); });
       ctx.setLineDash([]);
       // routes
       const lw = this.z < 6 ? 3 : this.z < 9 ? 4.5 : 6;
@@ -167,13 +167,13 @@
           ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
         });
       };
-      L.days.forEach((dd) => { if (dd.day !== L.selected) drawDay(dd, dd.color, lw, L.casing); });
-      const sel = L.days.find((dd) => dd.day === L.selected);
+      (L.days || []).forEach((dd) => { if (dd.day !== L.selected) drawDay(dd, dd.color, lw, L.casing); });
+      const sel = (L.days || []).find((dd) => dd.day === L.selected);
       if (sel) drawDay(sel, '#F2B630', lw + 3, '#1E2638');
 
       // week badges (zoomed out)
       if (this.z < 7.2) {
-        L.weekBadges.forEach((b) => {
+        (L.weekBadges || []).forEach((b) => {
           const [sx, sy] = this.toScreen(b.x, b.y);
           ctx.beginPath(); ctx.arc(sx, sy, 11, 0, Math.PI * 2); ctx.fillStyle = b.color; ctx.fill();
           ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
@@ -183,7 +183,7 @@
         });
       }
       // overnights
-      L.nights.forEach((nt) => {
+      (L.nights || []).forEach((nt) => {
         const [sx, sy] = this.toScreen(nt.x, nt.y);
         if (sx < -30 || sy < -30 || sx > w + 30 || sy > h + 30) return;
         if (nt.kind === 'Overnight') {
@@ -204,7 +204,7 @@
       // highlights
       if (L.showSights && this.z >= 6.3) {
         ctx.font = '19px system-ui, "Apple Color Emoji", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        L.sights.forEach((s) => {
+        (L.sights || []).forEach((s) => {
           const [sx, sy] = this.toScreen(s.x, s.y);
           if (sx < -20 || sy < -20 || sx > w + 20 || sy > h + 20) return;
           ctx.beginPath(); ctx.arc(sx, sy, 13, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,.88)'; ctx.fill();
@@ -213,6 +213,24 @@
           this.hits.push({ kind: 'sight', name: s.name, x: sx, y: sy, r: 16 });
         });
       }
+      // shops and water for the selected day (zoomed in)
+      if (L.pois && L.pois.length && this.z >= 11) {
+        ctx.font = '14px system-ui, "Apple Color Emoji", sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        L.pois.forEach((p) => {
+          const [sx, sy] = this.toScreen(p.x, p.y);
+          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) return;
+          ctx.beginPath(); ctx.arc(sx, sy, 10, 0, Math.PI * 2); ctx.fillStyle = 'rgba(255,255,255,.9)'; ctx.fill();
+          ctx.fillText(p.emoji, sx, sy + 1);
+        });
+      }
+      // family check-ins
+      (L.checkins || []).forEach((c) => {
+        const [sx, sy] = this.toScreen(c.x, c.y);
+        if (sx < -20 || sy < -20 || sx > w + 20 || sy > h + 20) return;
+        ctx.beginPath(); ctx.arc(sx, sy, c.latest ? 9 : 6, 0, Math.PI * 2); ctx.fillStyle = c.latest ? '#B8341F' : '#2B6A8A'; ctx.fill();
+        ctx.lineWidth = 2.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+        this.hits.push({ kind: 'checkin', id: c.id, x: sx, y: sy, r: 14 });
+      });
       // me
       if (L.me) {
         const [sx, sy] = this.toScreen(lonX(L.me.lon), latY(L.me.lat));
