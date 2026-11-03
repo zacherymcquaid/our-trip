@@ -92,6 +92,7 @@
       ['Agoda', 'often cheaper in the Balkans', `https://www.agoda.com/search?textToSearch=${q}&checkIn=${ci}&los=${nights}&adults=2&rooms=1`],
       ['Airbnb', 'rooms & apartments', `https://www.airbnb.com/s/${q}/homes?checkin=${ci}&checkout=${co}&adults=2`],
       ['Campsites', 'on Google Maps', `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent('camping near ' + searchPlace(d.end) + ' ' + country)}`],
+      ['Warmshowers', 'free cyclist hosts', 'https://www.warmshowers.org/'],
       ['Hostelworld', 'hostels', `https://www.hostelworld.com/search?search_keywords=${qPlain}&date_from=${ci}&date_to=${co}&number_of_guests=2`],
       ['Weather', `forecast for ${searchPlace(d.end)}`, `https://www.google.com/search?q=${encodeURIComponent('weather ' + searchPlace(d.end) + ' ' + country)}`],
     ];
@@ -409,6 +410,7 @@
       ${(places.length || endStory) ? `<div class="card"><h3>Stories along the way</h3>
         ${places.map((p) => `<div class="story" data-place="${esc(p.name)}" role="button" tabindex="0"><b>${(CAT[p.cat] || ['📍'])[0]} ${esc(short(p.name))}</b><span class="small">${esc(story(p.name) || p.note)}</span></div>`).join('')}
         ${endStory && !places.some((p) => short(p.name) === short(d.end)) ? `<div class="story"><b>🏕️ Tonight: ${esc(short(d.end))}</b><span class="small">${esc(endStory)}</span></div>` : ''}</div>` : ''}
+      ${tonightCard(d)}
       ${komootCard(d)}
       <div class="card"><h3>Sleep in ${esc(searchPlace(d.end))}</h3><p class="small muted">Dates and 2 adults are filled in. ${rest ? 'Two nights because of the rest day.' : ''}</p>
         <div class="links">${stays.map(([a, b, u]) => `<a href="${u}" target="_blank" rel="noopener"><b>${a}</b><span>${esc(b)}</span></a>`).join('')}</div></div>
@@ -424,6 +426,16 @@
         <button class="btn ${done ? 'ok' : ''}" data-act="toggle-done">${done ? '✓ We rode it!' : 'Mark as ridden'}</button>
       </div>
       <div class="row between">${prev ? `<button class="chip" data-go-day="${prev.day}">‹ Day ${prev.day}</button>` : '<span></span>'}${next ? `<button class="chip" data-go-day="${next.day}">Day ${next.day} ›</button>` : '<span></span>'}</div>`;
+  }
+  function tonightCard(d) {
+    const place = esc(searchPlace(d.end));
+    if (d.restNext) return `<div class="card" style="border-color:var(--gold);border-width:2px"><div class="eyebrow">Tonight and tomorrow</div>
+        <h3>Book a room in ${place} for 2 nights</h3><p class="small">Rest day: hot shower, laundry, dry the tent and go explore. Booking links are below.</p></div>`;
+    if (d.camp) return `<div class="card" style="border-color:var(--ok);border-width:2px"><div class="eyebrow">Tonight</div>
+        <h3>⛺ Camp: ${esc(d.camp.name)}</h3><p class="small">${d.camp.km < 1 ? 'Right at the end of the day.' : `${d.camp.km} km from the end of the route.`} Call or check the website for 2027 season dates.</p>
+        <a class="btn small ok" href="https://www.google.com/maps/search/?api=1&query=${d.camp.lat},${d.camp.lon}" target="_blank" rel="noopener">Open campsite in Maps</a></div>`;
+    return `<div class="card" style="border-color:var(--sea);border-width:2px"><div class="eyebrow">Tonight</div>
+        <h3>No campsite near ${place}</h3><p class="small">Try a Warmshowers host first, then a cheap room or farm stay. In Albania and Greece, ask guesthouses if you can pitch your tent in the garden.</p></div>`;
   }
   const KOMOOT_RE = /https?:\/\/(?:www\.)?komoot\.(?:com|de)\/[^\s"'<>]+/gi;
   function komootCard(d) {
